@@ -5,7 +5,7 @@ from model import build_score_matrix, derive_match_markets, calculate_edge_and_k
 from ratings import calculate_match_lambdas
 from database import init_db, log_trade
 
-# 1. Initialize SQLite Database
+# 1. Initialize SQLite Database (and ensure lookup index exists)
 init_db()
 
 # 2. Load private secrets from .env
@@ -61,98 +61,3 @@ for match in matches:
         
         for market in bookie.get("markets", []):
             m_key = market.get("key")
-            
-            # --- Scan 1X2 (Match Winner) ---
-            if m_key == "h2h":
-                for outcome in market.get("outcomes", []):
-                    name = outcome.get("name")
-                    price = outcome.get("price", 0)
-                    
-                    if price <= 1.0:
-                        continue
-                    
-                    target_market = None
-                    if name == home:
-                        target_market = fair_markets["home_win"]
-                        label = f"Home Win ({home})"
-                    elif name == away:
-                        target_market = fair_markets["away_win"]
-                        label = f"Away Win ({away})"
-                    elif name == "Draw":
-                        target_market = fair_markets["draw"]
-                        label = "Draw"
-                        
-                    if target_market:
-                        ev, stake = calculate_edge_and_kelly(
-                            model_prob=target_market["prob"],
-                            market_odds=price,
-                            bankroll=BANKROLL_INR,
-                            fraction=KELLY_FRACTION
-                        )
-                        
-                        if ev > 0.01:
-                            edges_found += 1
-                            edge_pct = round(ev * 100, 2)
-                            fair_price = round(target_market['fair_odds'], 2)
-                            
-                            # Print to terminal
-                            print(f"[+EV FOUND] {match_title}")
-                            print(f"  Market: 1X2 -> {label} @ Odds {price:.2f} (Bookie: {bookie_name})")
-                            print(f"  Edge (EV): +{edge_pct}% | Stake: ₹{stake:,.2f}")
-                            print("-" * 50)
-                            
-                            # Log to SQLite
-                            log_trade(
-                                match_name=match_title,
-                                market_type="1X2",
-                                selection=label,
-                                bookmaker=bookie_name,
-                                market_odds=price,
-                                fair_odds=fair_price,
-                                edge_percent=edge_pct,
-                                stake_inr=stake
-                            )
-
-            # --- Scan Over 2.5 Goals ---
-            elif m_key == "totals":
-                for outcome in market.get("outcomes", []):
-                    point = outcome.get("point")
-                    side = outcome.get("name")
-                    price = outcome.get("price", 0)
-
-                    if point == 2.5 and side == "Over" and price > 1.0:
-                        target_market = fair_markets["over_2_5"]
-                        ev, stake = calculate_edge_and_kelly(
-                            model_prob=target_market["prob"],
-                            market_odds=price,
-                            bankroll=BANKROLL_INR,
-                            fraction=KELLY_FRACTION
-                        )
-
-                        if ev > 0.01:
-                            edges_found += 1
-                            edge_pct = round(ev * 100, 2)
-                            fair_price = round(target_market['fair_odds'], 2)
-                            
-                            # Print to terminal
-                            print(f"[+EV FOUND] {match_title}")
-                            print(f"  Market: Over 2.5 @ Odds {price:.2f} (Bookie: {bookie_name})")
-                            print(f"  Edge (EV): +{edge_pct}% | Stake: ₹{stake:,.2f}")
-                            print("-" * 50)
-                            
-                            # Log to SQLite
-                            log_trade(
-                                match_name=match_title,
-                                market_type="Totals",
-                                selection="Over 2.5",
-                                bookmaker=bookie_name,
-                                market_odds=price,
-                                fair_odds=fair_price,
-                                edge_percent=edge_pct,
-                                stake_inr=stake
-                            )
-
-if edges_found == 0:
-    print("Scan complete. No +EV opportunities > 1% found at current market prices.")
-else:
-    print(f"Scan complete. Total +EV signals logged to database: {edges_found}")
