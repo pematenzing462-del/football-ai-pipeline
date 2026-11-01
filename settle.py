@@ -13,7 +13,9 @@ if not API_KEY:
 init_db()
 
 SPORT = "soccer_epl"
-# Look back up to 3 days for completed scores (The Odds API default is 3 days)
+EXCHANGE_COMMISSION = 0.02
+
+# Query completed scores from the past 3 days
 SCORES_URL = f"https://api.the-odds-api.com/v4/sports/{SPORT}/scores/?apiKey={API_KEY}&daysFrom=3"
 
 def settle_trades():
@@ -30,8 +32,8 @@ def settle_trades():
         return
 
     events = res.json()
-    # Build a lookup mapping: "Home vs Away" -> {home_score, away_score, completed}
     completed_matches = {}
+    
     for ev in events:
         if not ev.get("completed", False):
             continue
@@ -70,42 +72,59 @@ def settle_trades():
         selection = trade["selection"]
         odds = trade["market_odds"]
         stake = trade["stake_inr"]
-        
-        won = False
-        
-        # --- Settle 1X2 Markets ---
-        if m_type == "1X2":
-            if "Home Win" in selection and h_score > a_score:
-                won = True
-            elif "Away Win" in selection and a_score > h_score:
-                won = True
-            elif "Draw" in selection and h_score == a_score:
-                won = True
-                
-        # --- Settle Totals Markets ---
-        elif m_type == "Totals":
-            if "Over 2.5" in selection and (h_score + a_score) > 2.5:
-                won = True
 
-        # Calculate P&L in INR
-        if won:
-            pnl = round(stake * (odds - 1.0), 2)
-            status = "WON"
-        else:
-            pnl = round(-stake, 2)
-            status = "LOST"
+        event_happened = False
+
+        # Determine the realized on-pitch match outcome
+        if "Home Win" in selection:
+            event_happened = (h_score > a_score)
+        elif "Away Win" in selection:
+            event_happened = (a_score > h_score)
+        elif "Draw" in selection:
+            event_happened = (h_score == a_score)
+        elif "Over 2.5" in selection:
+            event_happened = ((h_score + a_score) > 2.5)
+
+        won = False
+        pnl = 0.0
+
+        # --- Settle Back Bets ---
+        if "BACK" in m_type or m_type in ["1X2", "Totals"]:
+            if event_happened:
+                won = True
+                pnl = round(stake * (odds - 1.0), 2)
+                status = "WON"
+            else:
+                pnl = round(-stake, 2)
+                status = "LOST"
+
+        # --- Settle Lay Short-Sell Trades ---
+        elif "LAY" in m_type:
+            # Lay bet wins when the event fails to occur
+            if not event_happened:
+                won = True
+                # Win backer's stake minus exchange commission
+                pnl = round(stake * (1.0 - EXCHANGE_COMMISSION), 2)
+                status = "WON"
+            else:
+                # Pay out backer's profit (liability)
+                liability = stake * (odds - 1.0)
+                pnl = round(-liability, 2)
+                status = "LOST"
 
         update_trade_result(trade["id"], status, score_str, pnl)
         settled_count += 1
         total_pnl += pnl
 
-        print(f"[SETTLED: {status}] {trade['match_name']} ({score_str})")
-        print(f"  Selection: {selection} @ {odds:.2f} | Stake: ₹{stake:,.2f} | P&L: ₹{pnl:+,.2f}")
+        print(f"[{status}] {trade['match_name']} ({score_str})")
+        print(f"  Type: {m_type} | Selection: {selection} @ {odds:.2f}")
+        print(f"  Stake: ₹{stake:,.2f} | Net Realized P&L: ₹{pnl:+,.2f}")
+        print("-" * 65)
 
     if settled_count == 0:
-        print("Matches with pending trades are either still in progress or scheduled.")
+        print("Pending fixtures are either still active or not yet completed.")
     else:
-        print(f"\nSettled {settled_count} trades. Batch P&L: ₹{total_pnl:+,.2f}")
+        print(f"\nSettled {settled_count} trades. Cycle Realized P&L: ₹{total_pnl:+,.2f}")
 
 if __name__ == "__main__":
     settle_trades()
