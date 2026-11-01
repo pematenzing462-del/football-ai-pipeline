@@ -1,100 +1,98 @@
+def calculate_green_up(back_stake, back_odds, current_lay_odds, commission=0.02):
+    """
+    Calculates the exact Lay stake required to lock in an equal, 
+    risk-free profit across all outcomes (Greening-Up).
+    """
+    if current_lay_odds <= 1.0 or back_odds <= 1.0:
+        return {"lay_stake": 0.0, "net_profit": 0.0}
+
+    # Hedged lay stake formula: (Back Stake * Back Odds) / Current Lay Odds
+    target_lay_stake = round((back_stake * back_odds) / current_lay_odds, 2)
+    
+    # Gross profit before commission
+    gross_profit = target_lay_stake - back_stake
+    net_profit = round(gross_profit * (1.0 - commission), 2) if gross_profit > 0 else round(gross_profit, 2)
+    
+    return {
+        "lay_stake": target_lay_stake,
+        "net_profit": net_profit,
+        "is_profitable": net_profit > 0
+    }
+
 def evaluate_market_trade(model_prob, back_odds, lay_odds, commission=0.02):
     """
-    Evaluates whether an outcome presents a mathematical Back Edge, Lay Edge,
-    or should be avoided based on model probabilities and exchange commission.
+    Evaluates both sides of an exchange order book (Back vs Lay).
+    Returns whether to Back (Buy), Lay (Short-Sell), or Pass.
     """
-    fair_odds = 1.0 / model_prob
+    # 1. Back EV: Expected return on standard buy
+    back_ev = (model_prob * back_odds) - 1.0
     
-    # Back EV: Expected Return - 1
-    back_ev = (model_prob * (back_odds - 1.0)) - (1.0 - model_prob)
-    
-    # Lay EV: Probability outcome fails * net backer stake - probability outcome happens * lay liability
+    # 2. Lay EV: Net expected value of short-selling (taking backer's money)
+    # Lay wins when event fails: (1 - p) * Stake * (1 - comm)
+    # Lay loses when event occurs: -p * Liability = -p * Stake * (lay_odds - 1)
     prob_fail = 1.0 - model_prob
-    lay_ev = (prob_fail * (1.0 - commission)) - (model_prob * (lay_odds - 1.0))
+    net_win_factor = 1.0 - commission
+    loss_factor = lay_odds - 1.0
+    lay_ev = (prob_fail * net_win_factor) - (model_prob * loss_factor)
+
+    back_ev_pct = round(back_ev * 100.0, 2)
+    lay_ev_pct = round(lay_ev * 100.0, 2)
+
+    if back_ev > 0.02 and back_ev >= lay_ev:
+        return {
+            "action": "BACK (BUY)",
+            "side": "BACK",
+            "back_ev_pct": back_ev_pct,
+            "lay_ev_pct": lay_ev_pct,
+            "selected_odds": back_odds
+        }
+    elif lay_ev > 0.02 and lay_ev > back_ev:
+        return {
+            "action": "LAY (SHORT-SELL)",
+            "side": "LAY",
+            "back_ev_pct": back_ev_pct,
+            "lay_ev_pct": lay_ev_pct,
+            "selected_odds": lay_odds
+        }
+    else:
+        return {
+            "action": "PASS",
+            "side": "NONE",
+            "back_ev_pct": back_ev_pct,
+            "lay_ev_pct": lay_ev_pct,
+            "selected_odds": 0.0
+        }
+
+def evaluate_draw_sniper(lam_home, lam_away, model_draw_prob, draw_market_odds, min_edge_pct=8.0):
+    """
+    Screens for high-edge draw trades in low-scoring/defensive fixtures.
+    Flags opportunities where retail neglect pushes market draw odds into +EV territory.
+    """
+    projected_total = lam_home + lam_away
     
-    action = "PASS"
-    edge_pct = 0.0
+    # Condition 1: Projected total goals must indicate a low/medium scoring environment
+    if projected_total > 2.30:
+        return {"qualified": False, "reason": f"Expected goals too high ({projected_total:.2f} > 2.30)"}
     
-    if back_ev > 0.02:
-        action = "BACK (BUY)"
-        edge_pct = round(back_ev * 100, 2)
-    elif lay_ev > 0.02:
-        action = "LAY (SHORT-SELL)"
-        edge_pct = round(lay_ev * 100, 2)
+    # Condition 2: Check EV against market odds
+    fair_odds = round(1.0 / model_draw_prob, 2) if model_draw_prob > 0 else 999.0
+    ev = (model_draw_prob * draw_market_odds) - 1.0
+    edge_pct = round(ev * 100.0, 2)
+    
+    if edge_pct < min_edge_pct:
+        return {
+            "qualified": False, 
+            "reason": f"Edge below threshold (+{edge_pct}% < +{min_edge_pct}%)",
+            "edge_pct": edge_pct,
+            "fair_odds": fair_odds
+        }
         
     return {
-        "action": action,
-        "fair_odds": round(fair_odds, 2),
-        "back_ev_pct": round(back_ev * 100, 2),
-        "lay_ev_pct": round(lay_ev * 100, 2),
-        "primary_edge_pct": edge_pct
+        "qualified": True,
+        "edge_pct": edge_pct,
+        "fair_odds": fair_odds,
+        "market_odds": draw_market_odds,
+        "model_prob": model_draw_prob,
+        "projected_total": round(projected_total, 2)
     }
-
-def calculate_green_up(back_stake_inr, back_odds, current_lay_odds, commission=0.02):
-    """
-    Computes exact Lay Stake, Liability, and Guaranteed Locked Profit in ₹
-    to hedge out of an existing open Back position (equal P&L regardless of outcome).
-    """
-    # Lay stake required to equalize profit across outcomes factoring commission
-    lay_stake = (back_stake_inr * back_odds) / (current_lay_odds - commission)
-    liability = lay_stake * (current_lay_odds - 1.0)
-    
-    # Net profit if selection wins
-    profit_win = (back_stake_inr * (back_odds - 1.0)) - liability
-    # Net profit if selection loses
-    profit_lose = (lay_stake * (1.0 - commission)) - back_stake_inr
-    
-    guaranteed_pnl = min(profit_win, profit_lose)
-    roi_percent = (guaranteed_pnl / back_stake_inr) * 100
-    
-    return {
-        "recommended_lay_stake_inr": round(lay_stake, 2),
-        "liability_inr": round(liability, 2),
-        "profit_if_win_inr": round(profit_win, 2),
-        "profit_if_lose_inr": round(profit_lose, 2),
-        "guaranteed_pnl_inr": round(guaranteed_pnl, 2),
-        "roi_percent": round(roi_percent, 2)
-    }
-
-if __name__ == "__main__":
-    print("=" * 65)
-    print(" QUANTITATIVE EXCHANGE ENGINE: BACK, LAY & HEDGING TEST ")
-    print("=" * 65)
-    
-    # ---------------------------------------------------------
-    # Scenario A: Evaluating Trade Signals (Back vs Lay)
-    # ---------------------------------------------------------
-    print("\n[TEST 1: OVERPRICED OUTCOME -> SHORT-SELL (LAY)]")
-    # True probability of an upset is 18% (Fair Odds: 5.56)
-    # Market hype pushes Lay odds down to 3.80 (significantly underpriced risk)
-    simulated_prob = 0.18
-    market_back = 3.75
-    market_lay = 3.80
-    
-    signal = evaluate_market_trade(simulated_prob, market_back, market_lay)
-    print(f"Model Fair Odds: {signal['fair_odds']}")
-    print(f"Market Prices   : Back @ {market_back} | Lay @ {market_lay}")
-    print(f"Back EV         : {signal['back_ev_pct']:+}%")
-    print(f"Lay EV          : {signal['lay_ev_pct']:+}%")
-    print(f"Decision        : {signal['action']} with {signal['primary_edge_pct']}% edge")
-    
-    # ---------------------------------------------------------
-    # Scenario B: Hedging / Greening-Up an Active Position
-    # ---------------------------------------------------------
-    print("\n" + "-" * 65)
-    print("[TEST 2: GREENING-UP (RISK-FREE CASH OUT)]")
-    # You backed an underdog at 4.20 with ₹1,500.
-    # In-play or closer to matchday, their odds drop to 2.30.
-    initial_stake = 1500.0
-    initial_odds = 4.20
-    current_lay = 2.30
-    
-    hedge = calculate_green_up(initial_stake, initial_odds, current_lay)
-    print(f"Initial Position : Backed @ {initial_odds} with ₹{initial_stake:,.2f}")
-    print(f"Current Lay Odds : {current_lay}")
-    print(f"Required Lay     : Place Lay bet of ₹{hedge['recommended_lay_stake_inr']:,.2f}")
-    print(f"Exchange Risk    : Maximum Liability ₹{hedge['liability_inr']:,.2f}")
-    print(f"Result (If Win)  : ₹{hedge['profit_if_win_inr']:+,.2f}")
-    print(f"Result (If Lose) : ₹{hedge['profit_if_lose_inr']:+,.2f}")
-    print(f"Locked Profit    : ₹{hedge['guaranteed_pnl_inr']:+,.2f} ({hedge['roi_percent']}% ROI guaranteed)")
     print("=" * 65 + "\n")

@@ -1,17 +1,17 @@
 import sqlite3
-from datetime import datetime
 
 DB_NAME = "trades.db"
 
 def init_db():
-    """Initializes the SQLite database and adds settlement columns if missing."""
+    """Initializes the database schema and migrates columns if they don't exist."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
+    # Create baseline table
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS signals (
+        CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             match_name TEXT,
             market_type TEXT,
             selection TEXT,
@@ -20,91 +20,83 @@ def init_db():
             fair_odds REAL,
             edge_percent REAL,
             stake_inr REAL,
+            closing_odds REAL DEFAULT NULL,
+            clv_percent REAL DEFAULT NULL,
             status TEXT DEFAULT 'PENDING',
-            result_score TEXT,
+            score TEXT DEFAULT NULL,
             pnl_inr REAL DEFAULT 0.0
         )
     """)
+    conn.commit()
 
-    # Graceful migration for existing tables created without settlement columns
-    cursor.execute("PRAGMA table_info(signals)")
-    cols = [row[1] for row in cursor.fetchall()]
-    if "status" not in cols:
-        cursor.execute("ALTER TABLE signals ADD COLUMN status TEXT DEFAULT 'PENDING'")
-    if "result_score" not in cols:
-        cursor.execute("ALTER TABLE signals ADD COLUMN result_score TEXT")
-    if "pnl_inr" not in cols:
-        cursor.execute("ALTER TABLE signals ADD COLUMN pnl_inr REAL DEFAULT 0.0")
+    # Safely migrate existing databases if columns are missing
+    cursor.execute("PRAGMA table_info(trades)")
+    columns = [col[1] for col in cursor.fetchall()]
 
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_signal_lookup 
-        ON signals (match_name, selection, bookmaker, timestamp)
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_signal_status 
-        ON signals (status)
-    """)
-    
+    if "closing_odds" not in columns:
+        cursor.execute("ALTER TABLE trades ADD COLUMN closing_odds REAL DEFAULT NULL")
+    if "clv_percent" not in columns:
+        cursor.execute("ALTER TABLE trades ADD COLUMN clv_percent REAL DEFAULT NULL")
+
     conn.commit()
     conn.close()
 
 def log_trade(match_name, market_type, selection, bookmaker, market_odds, fair_odds, edge_percent, stake_inr):
-    """Saves an identified +EV signal if not logged in the last 24 hours at the same odds."""
+    """Logs a trade if it hasn't been logged in the past 24 hours (deduplication)."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
+
     cursor.execute("""
-        SELECT market_odds FROM signals
-        WHERE match_name = ? 
-          AND selection = ? 
-          AND bookmaker = ?
-          AND datetime(timestamp) >= datetime('now', '-24 hours')
-        ORDER BY id DESC
-        LIMIT 1
-    """, (match_name, selection, bookmaker))
+        SELECT id FROM trades 
+        WHERE match_name = ? AND market_type = ? AND selection = ? AND bookmaker = ?
+        AND timestamp >= datetime('now', '-24 hours')
+    """, (match_name, market_type, selection, bookmaker))
     
     existing = cursor.fetchone()
-    if existing and existing[0] == market_odds:
+
+    if existing:
         conn.close()
-        return False
-    
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return False  # Duplicate signal
+
     cursor.execute("""
-        INSERT INTO signals (
-            timestamp, match_name, market_type, selection, 
-            bookmaker, market_odds, fair_odds, edge_percent, stake_inr, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
-    """, (
-        current_time, match_name, market_type, selection,
-        bookmaker, market_odds, fair_odds, edge_percent, stake_inr
-    ))
-    
+        INSERT INTO trades (
+            match_name, market_type, selection, bookmaker,
+            market_odds, fair_odds, edge_percent, stake_inr, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
+    """, (match_name, market_type, selection, bookmaker, market_odds, fair_odds, edge_percent, stake_inr))
+
     conn.commit()
     conn.close()
     return True
 
 def get_pending_trades():
-    """Retrieves all trades awaiting settlement."""
+    """Fetches all unsettled trades for matching against final scores and closing lines."""
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+
     cursor.execute("""
-        SELECT id, match_name, market_type, selection, market_odds, stake_inr
-        FROM signals
+        SELECT * FROM trades 
         WHERE status = 'PENDING'
     """)
-    rows = cursor.fetchall()
+    rows = [dict(row) for row in cursor.fetchall()]
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
 
-def update_trade_result(trade_id, status, result_score, pnl_inr):
-    """Updates a trade row with settlement outcome and profit/loss."""
+def update_trade_result(trade_id, status, score, pnl_inr, closing_odds=None, clv_percent=None):
+    """Updates match result, realized P&L, and closing line value metrics."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+
     cursor.execute("""
-        UPDATE signals
-        SET status = ?, result_score = ?, pnl_inr = ?
+        UPDATE trades 
+        SET status = ?, score = ?, pnl_inr = ?, closing_odds = ?, clv_percent = ?
         WHERE id = ?
-    """, (status, result_score, pnl_inr, trade_id))
+    """, (status, score, pnl_inr, closing_odds, clv_percent, trade_id))
+
     conn.commit()
     conn.close()
+
+if __name__ == "__main__":
+    init_db()
+    print("Database trades.db initialized with CLV columns successfully.")
