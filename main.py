@@ -3,17 +3,20 @@ import requests
 from dotenv import load_dotenv
 from model import build_score_matrix, derive_match_markets, calculate_edge_and_kelly
 from ratings import calculate_match_lambdas
+from database import init_db, log_trade
 
-# 1. Load private secrets from .env
+# 1. Initialize SQLite Database
+init_db()
+
+# 2. Load private secrets from .env
 load_dotenv()
 API_KEY = os.getenv("ODDS_API_KEY")
 
 if not API_KEY:
-    print("Error: ODDS_API_KEY not found! Make sure you created a .env file containing:")
-    print('ODDS_API_KEY="your_api_key_here"')
+    print("Error: ODDS_API_KEY not found! Check your .env file.")
     exit()
 
-# 2. Portfolio & Risk Settings
+# 3. Portfolio & Risk Settings
 SPORT = "soccer_epl"
 BANKROLL_INR = 25000.0   # Testing bankroll in Rupees
 KELLY_FRACTION = 0.25    # Quarter-Kelly risk mitigation
@@ -22,7 +25,7 @@ KELLY_FRACTION = 0.25    # Quarter-Kelly risk mitigation
 URL = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds/?apiKey={API_KEY}&regions=eu&markets=h2h,totals"
 
 print("==================================================")
-print(" FOOTBALL AI: DIXON-COLES +EV SCANNER (1X2 & O/U) ")
+print(" FOOTBALL AI: DIXON-COLES +EV SCANNER & DB LOGGER ")
 print("==================================================")
 print("Connecting to live bookmaker feeds...\n")
 
@@ -30,7 +33,6 @@ response = requests.get(URL)
 
 if response.status_code != 200:
     print(f"Error connecting to odds server: {response.status_code}")
-    print(response.text)
     exit()
 
 matches = response.json()
@@ -41,6 +43,7 @@ edges_found = 0
 for match in matches:
     home = match.get("home_team", "Unknown")
     away = match.get("away_team", "Unknown")
+    match_title = f"{home} vs {away}"
     bookmakers = match.get("bookmakers", [])
     
     if not bookmakers:
@@ -87,14 +90,28 @@ for match in matches:
                             fraction=KELLY_FRACTION
                         )
                         
-                        # Filter for mathematical edge > 1%
                         if ev > 0.01:
                             edges_found += 1
-                            print(f"[+EV FOUND] {home} vs {away}")
+                            edge_pct = round(ev * 100, 2)
+                            fair_price = round(target_market['fair_odds'], 2)
+                            
+                            # Print to terminal
+                            print(f"[+EV FOUND] {match_title}")
                             print(f"  Market: 1X2 -> {label} @ Odds {price:.2f} (Bookie: {bookie_name})")
-                            print(f"  Model Fair Prob: {target_market['prob']*100:.1f}% (Fair Odds: {target_market['fair_odds']:.2f})")
-                            print(f"  Edge (EV): +{ev*100:.2f}% | Recommended Stake: ₹{stake:,.2f}")
+                            print(f"  Edge (EV): +{edge_pct}% | Stake: ₹{stake:,.2f}")
                             print("-" * 50)
+                            
+                            # Log to SQLite
+                            log_trade(
+                                match_name=match_title,
+                                market_type="1X2",
+                                selection=label,
+                                bookmaker=bookie_name,
+                                market_odds=price,
+                                fair_odds=fair_price,
+                                edge_percent=edge_pct,
+                                stake_inr=stake
+                            )
 
             # --- Scan Over 2.5 Goals ---
             elif m_key == "totals":
@@ -114,13 +131,28 @@ for match in matches:
 
                         if ev > 0.01:
                             edges_found += 1
-                            print(f"[+EV FOUND] {home} vs {away}")
-                            print(f"  Market: Total Goals -> Over 2.5 @ Odds {price:.2f} (Bookie: {bookie_name})")
-                            print(f"  Model Fair Prob: {target_market['prob']*100:.1f}% (Fair Odds: {target_market['fair_odds']:.2f})")
-                            print(f"  Edge (EV): +{ev*100:.2f}% | Recommended Stake: ₹{stake:,.2f}")
+                            edge_pct = round(ev * 100, 2)
+                            fair_price = round(target_market['fair_odds'], 2)
+                            
+                            # Print to terminal
+                            print(f"[+EV FOUND] {match_title}")
+                            print(f"  Market: Over 2.5 @ Odds {price:.2f} (Bookie: {bookie_name})")
+                            print(f"  Edge (EV): +{edge_pct}% | Stake: ₹{stake:,.2f}")
                             print("-" * 50)
+                            
+                            # Log to SQLite
+                            log_trade(
+                                match_name=match_title,
+                                market_type="Totals",
+                                selection="Over 2.5",
+                                bookmaker=bookie_name,
+                                market_odds=price,
+                                fair_odds=fair_price,
+                                edge_percent=edge_pct,
+                                stake_inr=stake
+                            )
 
 if edges_found == 0:
     print("Scan complete. No +EV opportunities > 1% found at current market prices.")
 else:
-    print(f"Scan complete. Total +EV trading signals detected: {edges_found}")
+    print(f"Scan complete. Total +EV signals logged to database: {edges_found}")
