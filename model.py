@@ -1,5 +1,12 @@
+"""
+model.py
+Bivariate Poisson model with Dixon-Coles low-score correction (rho=-0.11).
+Computes scoreline probability matrices, fair market odds, and pre-match/in-play probabilities.
+"""
+
 import numpy as np
 from scipy.stats import poisson
+from ratings import calculate_match_lambdas
 
 def apply_dixon_coles_tau(x, y, lam_x, lam_y, rho=-0.11):
     """
@@ -22,7 +29,6 @@ def adjust_inplay_lambdas(lam_home_pre, lam_away_pre, minute, current_home_goals
     Adjusts home and away lambdas based on elapsed time and in-play game state.
     """
     if minute >= 90:
-        # Minimal baseline for injury time
         remaining_fraction = 0.033  # ~3 mins stoppage
     else:
         remaining_fraction = max(0.0, (90.0 - minute) / 90.0)
@@ -36,12 +42,10 @@ def adjust_inplay_lambdas(lam_home_pre, lam_away_pre, minute, current_home_goals
 
     # Home trailing
     if goal_diff < 0:
-        # Home pushes forward, away counters
         lam_home_rem *= 1.12
         lam_away_rem *= 1.15
     # Away trailing
     elif goal_diff > 0:
-        # Away pushes forward, home counters
         lam_away_rem *= 1.12
         lam_home_rem *= 1.15
     else:
@@ -65,7 +69,8 @@ def build_score_matrix(lam_home, lam_away, max_goals=10, rho=-0.11):
             matrix[i, j] = p_i * p_j * tau
 
     # Normalize matrix so total probability sums to 1.0
-    return matrix / np.sum(matrix)
+    total = np.sum(matrix)
+    return matrix / total if total > 0 else matrix
 
 def derive_match_markets(score_grid, current_home=0, current_away=0):
     """
@@ -86,7 +91,6 @@ def derive_match_markets(score_grid, current_home=0, current_away=0):
         for rem_a in range(max_goals):
             prob = score_grid[rem_h, rem_a]
             
-            # Final full-time score
             final_h = current_home + rem_h
             final_a = current_away + rem_a
             total_goals = final_h + final_a
@@ -138,36 +142,40 @@ def calculate_edge_and_kelly(model_prob, market_odds, bankroll=25000.0, fraction
     suggested_stake = max(0.0, full_kelly * fraction * bankroll)
     return round(ev, 4), round(suggested_stake, 2)
 
+def calculate_match_probabilities(home_team, away_team, ratings=None, sport_key="soccer_epl"):
+    """
+    Pre-match wrapper called by main.py.
+    Calculates lambda values via ratings.py, builds the bivariate Dixon-Coles grid,
+    and returns a clean probability dictionary for 1X2 market evaluation.
+    """
+    # Detect league from ratings registry if available
+    if ratings and home_team in ratings:
+        sport_key = ratings[home_team].get("sport_key", sport_key)
+
+    lam_h, lam_a, lam_total = calculate_match_lambdas(home_team, away_team, sport_key=sport_key)
+    score_grid = build_score_matrix(lam_h, lam_a, max_goals=10, rho=-0.11)
+    markets = derive_match_markets(score_grid, current_home=0, current_away=0)
+
+    return {
+        "prob_home": markets["home_win"]["prob"],
+        "prob_draw": markets["draw"]["prob"],
+        "prob_away": markets["away_win"]["prob"],
+        "fair_home": markets["home_win"]["fair_odds"],
+        "fair_draw": markets["draw"]["fair_odds"],
+        "fair_away": markets["away_win"]["fair_odds"],
+        "lambda_home": lam_h,
+        "lambda_away": lam_a,
+        "lambda_total": lam_total
+    }
+
 if __name__ == "__main__":
     print("=" * 65)
-    print(" IN-PLAY DIXON-COLES ENGINE: ELCHE VS VALENCIA TEST ")
+    print(" TESTING PRE-MATCH PROBABILITIES IN MODEL.PY ")
     print("=" * 65)
-
-    # 1. Baseline pre-match full-game expected goals
-    lam_home_pre = 1.05  # Elche
-    lam_away_pre = 1.45  # Valencia
-
-    # 2. Live Match State from the screenshot: 78th minute, Elche 0 - 1 Valencia
-    minute = 78
-    cur_home = 0
-    cur_away = 1
-
-    lam_home_rem, lam_away_rem = adjust_inplay_lambdas(
-        lam_home_pre, lam_away_pre, minute, cur_home, cur_away
-    )
-    
-    print(f"Match State     : Minute {minute}' | Score: {cur_home}-{cur_away}")
-    print(f"Remaining Lambdas: Elche λ_rem = {lam_home_rem} | Valencia λ_rem = {lam_away_rem}")
-
-    # 3. Build remaining goals matrix & derive final markets
-    rem_grid = build_score_matrix(lam_home_rem, lam_away_rem)
-    markets = derive_match_markets(rem_grid, cur_home, cur_away)
-
-    print("\n--- IN-PLAY FAIR PROBABILITIES & ODDS ---")
-    print(f"Valencia Win (1.33 Back / 1.34 Lay): Fair Odds {markets['away_win']['fair_odds']} (Prob: {markets['away_win']['prob']*100:.1f}%)")
-    print(f"The Draw     (4.60 Back / 4.70 Lay): Fair Odds {markets['draw']['fair_odds']} (Prob: {markets['draw']['prob']*100:.1f}%)")
-    print(f"Elche Win    (28.0 Back / 30.0 Lay): Fair Odds {markets['home_win']['fair_odds']} (Prob: {markets['home_win']['prob']*100:.1f}%)")
-    print("-" * 65)
-    print(f"Under 2.5 Goals (1.11 Back / 1.12 Lay): Fair Odds {markets['under_2_5']['fair_odds']} (Prob: {markets['under_2_5']['prob']*100:.1f}%)")
-    print(f"Over 2.5 Goals  (9.80 Back / 10.0 Lay): Fair Odds {markets['over_2_5']['fair_odds']} (Prob: {markets['over_2_5']['prob']*100:.1f}%)")
+    res = calculate_match_probabilities("Arsenal", "Chelsea", sport_key="soccer_epl")
+    print(f"Arsenal vs Chelsea:")
+    print(f"  Home Win (Arsenal): {res['prob_home']*100:.1f}% (Fair: {res['fair_home']})")
+    print(f"  Draw              : {res['prob_draw']*100:.1f}% (Fair: {res['fair_draw']})")
+    print(f"  Away Win (Chelsea): {res['prob_away']*100:.1f}% (Fair: {res['fair_away']})")
+    print(f"  Total Expected λ  : {res['lambda_total']}")
     print("=" * 65)

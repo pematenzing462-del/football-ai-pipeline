@@ -1,98 +1,178 @@
-def calculate_green_up(back_stake, back_odds, current_lay_odds, commission=0.02):
-    """
-    Calculates the exact Lay stake required to lock in an equal, 
-    risk-free profit across all outcomes (Greening-Up).
-    """
-    if current_lay_odds <= 1.0 or back_odds <= 1.0:
-        return {"lay_stake": 0.0, "net_profit": 0.0}
+"""
+trade_engine.py
+Execution valuation, steam velocity tracking, and trade generation engine.
+Calculates net expected value (+EV) accounting for exchange commissions,
+determines quarter-Kelly stake sizing, validates opportunities against
+Pinnacle's no-vig benchmark, and detects institutional line steam.
+"""
 
-    # Hedged lay stake formula: (Back Stake * Back Odds) / Current Lay Odds
-    target_lay_stake = round((back_stake * back_odds) / current_lay_odds, 2)
-    
-    # Gross profit before commission
-    gross_profit = target_lay_stake - back_stake
-    net_profit = round(gross_profit * (1.0 - commission), 2) if gross_profit > 0 else round(gross_profit, 2)
-    
+def devig_pinnacle_odds(pinny_home: float, pinny_draw: float, pinny_away: float):
+    """
+    Strips the bookmaker margin (vig) from Pinnacle's 3-way odds
+    using proportional (multiplicative) normalization.
+    """
+    if pinny_home <= 1.0 or pinny_draw <= 1.0 or pinny_away <= 1.0:
+        return {}
+
+    # Calculate raw implied probabilities
+    raw_p_home = 1.0 / pinny_home
+    raw_p_draw = 1.0 / pinny_draw
+    raw_p_away = 1.0 / pinny_away
+
+    # Total overround (bookmaker margin)
+    total_overround = raw_p_home + raw_p_draw + raw_p_away
+    if total_overround <= 0.0:
+        return {}
+
+    # Strip margin to obtain true fair probabilities
+    fair_p_home = raw_p_home / total_overround
+    fair_p_draw = raw_p_draw / total_overround
+    fair_p_away = raw_p_away / total_overround
+
     return {
-        "lay_stake": target_lay_stake,
-        "net_profit": net_profit,
-        "is_profitable": net_profit > 0
+        "Home": {"prob": fair_p_home, "fair_odds": round(1.0 / fair_p_home, 2)},
+        "Draw": {"prob": fair_p_draw, "fair_odds": round(1.0 / fair_p_draw, 2)},
+        "Away": {"prob": fair_p_away, "fair_odds": round(1.0 / fair_p_away, 2)},
+        "overround_pct": round((total_overround - 1.0) * 100.0, 2)
     }
 
-def evaluate_market_trade(model_prob, back_odds, lay_odds, commission=0.02):
+def detect_steam_move(
+    current_pinny_odds: float,
+    prior_pinny_odds: float,
+    retail_odds: float,
+    prob_shift_threshold: float = 0.04
+):
     """
-    Evaluates both sides of an exchange order book (Back vs Lay).
-    Returns whether to Back (Buy), Lay (Short-Sell), or Pass.
-    """
-    # 1. Back EV: Expected return on standard buy
-    back_ev = (model_prob * back_odds) - 1.0
-    
-    # 2. Lay EV: Net expected value of short-selling (taking backer's money)
-    # Lay wins when event fails: (1 - p) * Stake * (1 - comm)
-    # Lay loses when event occurs: -p * Liability = -p * Stake * (lay_odds - 1)
-    prob_fail = 1.0 - model_prob
-    net_win_factor = 1.0 - commission
-    loss_factor = lay_odds - 1.0
-    lay_ev = (prob_fail * net_win_factor) - (model_prob * loss_factor)
+    Detects institutional steam moves on Pinnacle and identifies lagging retail prices.
 
-    back_ev_pct = round(back_ev * 100.0, 2)
-    lay_ev_pct = round(lay_ev * 100.0, 2)
+    Args:
+        current_pinny_odds: Pinnacle's current market price.
+        prior_pinny_odds: Pinnacle's price from an earlier snapshot.
+        retail_odds: Current price offered by a retail/soft book.
+        prob_shift_threshold: Minimum shift in implied probability to classify as steam (default: 4%).
 
-    if back_ev > 0.02 and back_ev >= lay_ev:
-        return {
-            "action": "BACK (BUY)",
-            "side": "BACK",
-            "back_ev_pct": back_ev_pct,
-            "lay_ev_pct": lay_ev_pct,
-            "selected_odds": back_odds
-        }
-    elif lay_ev > 0.02 and lay_ev > back_ev:
-        return {
-            "action": "LAY (SHORT-SELL)",
-            "side": "LAY",
-            "back_ev_pct": back_ev_pct,
-            "lay_ev_pct": lay_ev_pct,
-            "selected_odds": lay_odds
-        }
-    else:
-        return {
-            "action": "PASS",
-            "side": "NONE",
-            "back_ev_pct": back_ev_pct,
-            "lay_ev_pct": lay_ev_pct,
-            "selected_odds": 0.0
-        }
+    Returns:
+        (is_steam: bool, lag_edge_pct: float, reason: str)
+    """
+    if not current_pinny_odds or not prior_pinny_odds or retail_odds <= 1.0:
+        return False, 0.0, ""
 
-def evaluate_draw_sniper(lam_home, lam_away, model_draw_prob, draw_market_odds, min_edge_pct=8.0):
+    prior_prob = 1.0 / prior_pinny_odds
+    current_prob = 1.0 / current_pinny_odds
+    prob_delta = current_prob - prior_prob
+
+    # Steam condition: Probability spiked sharply (odds dropped significantly)
+    if prob_delta < prob_shift_threshold:
+        return False, 0.0, ""
+
+    # Check if retail book hasn't adjusted down to match the sharp market move
+    if retail_odds > current_pinny_odds:
+        lag_edge = (retail_odds / current_pinny_odds) - 1.0
+        reason = (
+            f"Pinny shifted {prior_pinny_odds:.2f} -> {current_pinny_odds:.2f} "
+            f"(+{prob_delta*100:.1f}% implied prob shift). Retail lagging at {retail_odds:.2f}."
+        )
+        return True, round(lag_edge * 100.0, 2), reason
+
+    return False, 0.0, ""
+
+def calculate_net_edge(model_prob: float, market_odds: float, commission: float = 0.02):
     """
-    Screens for high-edge draw trades in low-scoring/defensive fixtures.
-    Flags opportunities where retail neglect pushes market draw odds into +EV territory.
+    Computes true edge after subtracting exchange commission from winnings.
+    Commission applies strictly to net profit: (odds - 1.0) * (1.0 - commission).
     """
-    projected_total = lam_home + lam_away
-    
-    # Condition 1: Projected total goals must indicate a low/medium scoring environment
-    if projected_total > 2.30:
-        return {"qualified": False, "reason": f"Expected goals too high ({projected_total:.2f} > 2.30)"}
-    
-    # Condition 2: Check EV against market odds
-    fair_odds = round(1.0 / model_draw_prob, 2) if model_draw_prob > 0 else 999.0
-    ev = (model_draw_prob * draw_market_odds) - 1.0
-    edge_pct = round(ev * 100.0, 2)
-    
-    if edge_pct < min_edge_pct:
-        return {
-            "qualified": False, 
-            "reason": f"Edge below threshold (+{edge_pct}% < +{min_edge_pct}%)",
-            "edge_pct": edge_pct,
-            "fair_odds": fair_odds
-        }
-        
-    return {
-        "qualified": True,
-        "edge_pct": edge_pct,
-        "fair_odds": fair_odds,
-        "market_odds": draw_market_odds,
-        "model_prob": model_draw_prob,
-        "projected_total": round(projected_total, 2)
-    }
-    print("=" * 65 + "\n")
+    if model_prob <= 0.0 or market_odds <= 1.0:
+        return -1.0, 0.0
+
+    net_odds = 1.0 + (market_odds - 1.0) * (1.0 - commission)
+    expected_value = (model_prob * net_odds) - 1.0
+    return round(expected_value, 4), round(net_odds, 4)
+
+def calculate_fractional_kelly(model_prob: float, net_odds: float, bankroll: float = 25000.0, fraction: float = 0.25):
+    """
+    Calculates stake size in INR using Fractional Kelly criterion (quarter-Kelly).
+    """
+    if net_odds <= 1.0 or model_prob <= 0.0:
+        return 0.0
+
+    b = net_odds - 1.0
+    p = model_prob
+    q = 1.0 - p
+
+    full_kelly = (b * p - q) / b
+    if full_kelly <= 0.0:
+        return 0.0
+
+    raw_stake = full_kelly * fraction * bankroll
+    return round(raw_stake, 2)
+
+def evaluate_match_edges(
+    probs: dict,
+    market_odds: dict,
+    pinnacle_odds: dict = None,
+    bankroll: float = 25000.0,
+    commission: float = 0.02,
+    min_edge: float = 0.02,
+    require_pinny_agreement: bool = False
+):
+    """
+    Evaluates 1X2 market outcomes for positive expected value (+EV).
+    If require_pinny_agreement=True, only triggers when Pinnacle's no-vig line agrees.
+    """
+    opportunities = []
+    outcomes = ["Home", "Draw", "Away"]
+
+    pinny_devigged = {}
+    if pinnacle_odds and all(pinnacle_odds.get(k, 0) > 1.0 for k in outcomes):
+        pinny_devigged = devig_pinnacle_odds(
+            pinnacle_odds["Home"],
+            pinnacle_odds["Draw"],
+            pinnacle_odds["Away"]
+        )
+
+    for outcome in outcomes:
+        model_p = probs.get(outcome, 0.0)
+        taken_odds = market_odds.get(outcome, 0.0)
+
+        if model_p <= 0.001 or taken_odds <= 1.0:
+            continue
+
+        fair_odds = round(1.0 / model_p, 2)
+        model_edge, net_odds = calculate_net_edge(model_p, taken_odds, commission=commission)
+
+        if model_edge <= min_edge:
+            continue
+
+        pinny_edge = None
+        pinny_fair_odds = None
+        if pinny_devigged and outcome in pinny_devigged:
+            sharp_prob = pinny_devigged[outcome]["prob"]
+            pinny_fair_odds = pinny_devigged[outcome]["fair_odds"]
+            pinny_edge = (sharp_prob * (1.0 + (taken_odds - 1.0) * (1.0 - commission))) - 1.0
+
+            if require_pinny_agreement and pinny_edge <= 0.0:
+                continue
+
+        stake = calculate_fractional_kelly(model_p, net_odds, bankroll=bankroll, fraction=0.25)
+        if stake > 0:
+            opportunities.append({
+                "outcome": outcome,
+                "fair_odds": fair_odds,
+                "market_odds": taken_odds,
+                "edge_pct": round(model_edge * 100.0, 2),
+                "stake": stake,
+                "pinny_fair_odds": pinny_fair_odds,
+                "pinny_edge_pct": round(pinny_edge * 100.0, 2) if pinny_edge is not None else None
+            })
+
+    return opportunities
+
+def should_snipe_draw(lambda_total: float, prob_draw: float, market_draw_odds: float):
+    """
+    Draw-Sniper quantitative heuristic for low-scoring profiles.
+    """
+    if lambda_total <= 2.25 and prob_draw >= 0.28:
+        fair_draw = round(1.0 / prob_draw, 2)
+        if market_draw_odds > fair_draw:
+            return True, f"Low λ ({lambda_total:.2f}) + P(Draw) {prob_draw*100:.1f}%"
+    return False, ""
