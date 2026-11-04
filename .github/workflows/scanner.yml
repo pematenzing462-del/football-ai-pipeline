@@ -1,0 +1,40 @@
+name: Autonomous Quant Scanner
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests python-dotenv
+
+      - name: Run quantitative scan script
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python main.py --auto
+
+      - name: Commit and push updated trades.db (Duplicate prevention)
+        run: |
+          git config --global user.name "Quant Bot Automation"
+          git config --global user.email "bot@users.noreply.github.com"
+          git add trades.db
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update trades.db [skip ci]" && git push)
