@@ -1,124 +1,159 @@
 """
 alerts.py
-Telegram notification dispatcher for live trade signals.
-Stitches home & away crests side-by-side into a single sleek match banner.
+Formats quantitative trade signals (1X2 + Over/Under 2.5 Goals) and 
+dispatches them to Telegram via sendPhoto (with dynamic club crests) or sendMessage fallback.
 """
 
 import os
-from io import BytesIO
-from datetime import datetime
-import pytz
+import html
+import urllib.parse
 import requests
-from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
+# Manual overrides for major European clubs with unique naming conventions
 TEAM_LOGOS = {
     # Premier League
-    "Arsenal": "https://a.espncdn.com/i/teamlogos/soccer/500/359.png",
-    "Aston Villa": "https://a.espncdn.com/i/teamlogos/soccer/500/362.png",
-    "Bournemouth": "https://a.espncdn.com/i/teamlogos/soccer/500/349.png",
-    "Brentford": "https://a.espncdn.com/i/teamlogos/soccer/500/337.png",
-    "Brighton and Hove Albion": "https://a.espncdn.com/i/teamlogos/soccer/500/331.png",
-    "Chelsea": "https://a.espncdn.com/i/teamlogos/soccer/500/363.png",
-    "Crystal Palace": "https://a.espncdn.com/i/teamlogos/soccer/500/384.png",
-    "Everton": "https://a.espncdn.com/i/teamlogos/soccer/500/368.png",
-    "Fulham": "https://a.espncdn.com/i/teamlogos/soccer/500/370.png",
-    "Ipswich Town": "https://a.espncdn.com/i/teamlogos/soccer/500/373.png",
-    "Leicester City": "https://a.espncdn.com/i/teamlogos/soccer/500/375.png",
-    "Liverpool": "https://a.espncdn.com/i/teamlogos/soccer/500/364.png",
-    "Manchester City": "https://a.espncdn.com/i/teamlogos/soccer/500/382.png",
-    "Manchester United": "https://a.espncdn.com/i/teamlogos/soccer/500/360.png",
-    "Newcastle United": "https://a.espncdn.com/i/teamlogos/soccer/500/361.png",
-    "Nottingham Forest": "https://a.espncdn.com/i/teamlogos/soccer/500/393.png",
-    "Southampton": "https://a.espncdn.com/i/teamlogos/soccer/500/376.png",
-    "Tottenham Hotspur": "https://a.espncdn.com/i/teamlogos/soccer/500/367.png",
-    "West Ham United": "https://a.espncdn.com/i/teamlogos/soccer/500/371.png",
-    "Wolverhampton Wanderers": "https://a.espncdn.com/i/teamlogos/soccer/500/380.png",
-
+    "Arsenal": "https://upload.wikimedia.org/wikipedia/en/5/53/Arsenal_FC.svg.png",
+    "Aston Villa": "https://upload.wikimedia.org/wikipedia/en/f/f9/Aston_Villa_FC_crest_%282016%29.svg.png",
+    "Chelsea": "https://upload.wikimedia.org/wikipedia/en/c/cc/Chelsea_FC.svg.png",
+    "Liverpool": "https://upload.wikimedia.org/wikipedia/en/0/0c/Liverpool_FC.svg.png",
+    "Manchester City": "https://upload.wikimedia.org/wikipedia/en/e/eb/Manchester_City_FC_badge.svg.png",
+    "Manchester United": "https://upload.wikimedia.org/wikipedia/en/7/7a/Manchester_United_FC_crest.svg.png",
+    "Newcastle United": "https://upload.wikimedia.org/wikipedia/en/5/56/Newcastle_United_Logo.svg.png",
+    "Tottenham Hotspur": "https://upload.wikimedia.org/wikipedia/en/b/b4/Tottenham_Hotspur.svg.png",
+    "West Ham United": "https://upload.wikimedia.org/wikipedia/en/c/c2/West_Ham_United_FC_logo.svg.png",
+    
     # La Liga
-    "Athletic Bilbao": "https://a.espncdn.com/i/teamlogos/soccer/500/93.png",
-    "Atletico Madrid": "https://a.espncdn.com/i/teamlogos/soccer/500/1068.png",
-    "Barcelona": "https://a.espncdn.com/i/teamlogos/soccer/500/83.png",
-    "Celta Vigo": "https://a.espncdn.com/i/teamlogos/soccer/500/85.png",
-    "Espanyol": "https://a.espncdn.com/i/teamlogos/soccer/500/88.png",
-    "Getafe": "https://a.espncdn.com/i/teamlogos/soccer/500/2922.png",
-    "Girona": "https://a.espncdn.com/i/teamlogos/soccer/500/9812.png",
-    "Mallorca": "https://a.espncdn.com/i/teamlogos/soccer/500/84.png",
-    "Osasuna": "https://a.espncdn.com/i/teamlogos/soccer/500/97.png",
-    "Rayo Vallecano": "https://a.espncdn.com/i/teamlogos/soccer/500/101.png",
-    "Real Betis": "https://a.espncdn.com/i/teamlogos/soccer/500/244.png",
-    "Real Madrid": "https://a.espncdn.com/i/teamlogos/soccer/500/86.png",
-    "Real Sociedad": "https://a.espncdn.com/i/teamlogos/soccer/500/89.png",
-    "Sevilla": "https://a.espncdn.com/i/teamlogos/soccer/500/243.png",
-    "Valencia": "https://a.espncdn.com/i/teamlogos/soccer/500/94.png",
-    "Villarreal": "https://a.espncdn.com/i/teamlogos/soccer/500/102.png"
+    "Real Madrid": "https://upload.wikimedia.org/wikipedia/en/5/56/Real_Madrid_CF.svg.png",
+    "Barcelona": "https://upload.wikimedia.org/wikipedia/en/4/47/FC_Barcelona_%28crest%29.svg.png",
+    "Atletico Madrid": "https://upload.wikimedia.org/wikipedia/en/f/f4/Atletico_Madrid_2024_logo.svg.png",
+    "Villarreal": "https://upload.wikimedia.org/wikipedia/en/7/70/Villarreal_CF_logo.svg.png",
+    "Real Sociedad": "https://upload.wikimedia.org/wikipedia/en/f/f1/Real_Sociedad_logo.svg.png",
+    
+    # Serie A
+    "Inter": "https://upload.wikimedia.org/wikipedia/en/0/05/FC_Internazionale_Milano_2021.svg.png",
+    "AC Milan": "https://upload.wikimedia.org/wikipedia/en/d/d0/AC_Milan_Logo_2019.svg.png",
+    "Juventus": "https://upload.wikimedia.org/wikipedia/en/b/bc/Juventus_FC_2017_icon_%28black%29.svg.png",
+    "Napoli": "https://upload.wikimedia.org/wikipedia/en/2/28/SSC_Napoli_Logo.svg.png",
+    "Roma": "https://upload.wikimedia.org/wikipedia/en/f/f7/AS_Roma_Logo_2017.svg.png",
+    
+    # Bundesliga
+    "Bayern Munich": "https://upload.wikimedia.org/wikipedia/commons/1/1b/FC_Bayern_M%C3%BCnchen_logo_%282002%E2%80%932024%29.svg.png",
+    "Borussia Dortmund": "https://upload.wikimedia.org/wikipedia/commons/6/67/Borussia_Dortmund_logo.svg.png",
+    "Bayer Leverkusen": "https://upload.wikimedia.org/wikipedia/en/5/59/Bayer_04_Leverkusen_logo.svg.png",
+    "RB Leipzig": "https://upload.wikimedia.org/wikipedia/en/0/04/RB_Leipzig_2014_logo.svg.png",
+
+    # Eredivisie & Ligue 1
+    "Ajax": "https://upload.wikimedia.org/wikipedia/en/7/79/AFC_Ajax_%28logo%29.svg.png",
+    "PSV Eindhoven": "https://upload.wikimedia.org/wikipedia/en/0/05/PSV_Eindhoven.svg.png",
+    "Feyenoord": "https://upload.wikimedia.org/wikipedia/en/e/e3/Feyenoord_logo.svg.png",
+    "Paris Saint-Germain": "https://upload.wikimedia.org/wikipedia/en/a/a7/Paris_Saint-Germain_F.C..svg.png"
 }
 
-def find_logo(team_name: str) -> str:
-    if not team_name:
-        return ""
-    if team_name in TEAM_LOGOS:
-        return TEAM_LOGOS[team_name]
-    for key, url in TEAM_LOGOS.items():
-        if key.lower() in team_name.lower() or team_name.lower() in key.lower():
-            return url
-    return ""
+# Generic fallback images
+FALLBACK_LOGO_URL = "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=60"
+TOTALS_LOGO_URL = "https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=60"
 
-def generate_matchup_banner(home_team: str, away_team: str) -> BytesIO:
-    """
-    Downloads both crests, resizes them cleanly, and merges them onto
-    a single transparent canvas with natural spacing. Returns a PNG byte buffer.
-    """
-    url_home = find_logo(home_team)
-    url_away = find_logo(away_team)
 
-    if not url_home or not url_away:
-        return None
+def get_team_logo(home_team: str, selection: str) -> str:
+    """Dynamically generates or matches a club logo URL for any team worldwide across all leagues."""
+    sel_clean = selection.strip()
+    sel_lower = sel_clean.lower()
 
-    try:
-        res_h = requests.get(url_home, timeout=4)
-        res_a = requests.get(url_away, timeout=4)
-        if res_h.status_code != 200 or res_a.status_code != 200:
-            return None
+    # 1. Check manual overrides first
+    if sel_clean in TEAM_LOGOS:
+        return TEAM_LOGOS[sel_clean]
+    if home_team in TEAM_LOGOS:
+        return TEAM_LOGOS[home_team]
 
-        img_h = Image.open(BytesIO(res_h.content)).convert("RGBA")
-        img_a = Image.open(BytesIO(res_a.content)).convert("RGBA")
+    # 2. If it's a Totals market pick, use a clean football-goals visual asset
+    if "over" in sel_lower or "under" in sel_lower:
+        return TOTALS_LOGO_URL
 
-        # Resize both logos to a uniform compact size (150x150)
-        target_size = (150, 150)
-        img_h = img_h.resize(target_size, Image.Resampling.LANCZOS)
-        img_a = img_a.resize(target_size, Image.Resampling.LANCZOS)
+    # 3. Dynamic Fallback: Clean team name into a standard slug for global open-source badge repositories
+    target_team = sel_clean if sel_clean not in ["Draw", "Over 2.5", "Under 2.5"] else home_team
+    slug = (
+        target_team.lower()
+        .strip()
+        .replace(" ", "-")
+        .replace("é", "e")
+        .replace("ä", "a")
+        .replace("ö", "o")
+        .replace("ü", "u")
+    )
+    
+    return f"https://raw.githubusercontent.com/openfootball/logos/master/{slug}.png"
 
-        # Build a single wide canvas: 460px width x 160px height
-        canvas = Image.new("RGBA", (460, 160), (0, 0, 0, 0))
 
-        # Paste Home on left (x=30), Away on right (x=280)
-        canvas.paste(img_h, (30, 5), img_h)
-        canvas.paste(img_a, (280, 5), img_a)
+def format_trade_message(
+    home_team: str,
+    away_team: str,
+    selection: str,
+    market_odds: float,
+    fair_odds: float,
+    edge_pct: float,
+    stake: float,
+    cutoff_odds: float = None,
+    source: str = "Soft Book",
+    commence_time: str = "TBD",
+    pinny_fair: float = None,
+    steam_reason: str = ""
+) -> str:
+    """Builds an HTML-safe Telegram caption tailored for 1X2 or Over/Under 2.5 markets."""
+    sel_clean = selection.strip()
+    sel_lower = sel_clean.lower()
+    is_totals = sel_lower in ("over 2.5", "under 2.5")
 
-        buf = BytesIO()
-        canvas.save(buf, format="PNG")
-        buf.seek(0)
-        return buf
-    except Exception:
-        return None
+    if is_totals:
+        market_badge = "⚽ TOTAL GOALS (O/U 2.5)"
+        pick_display = f"{sel_clean.upper()} GOALS"
+    elif sel_lower == "draw":
+        market_badge = "⚔️ 1X2 MATCH WINNER"
+        pick_display = "DRAW (1X2)"
+    else:
+        market_badge = "⚔️ 1X2 MATCH WINNER"
+        pick_display = f"{sel_clean} (1X2)"
 
-def format_kickoff_ist(iso_time_str: str) -> str:
-    if not iso_time_str:
-        return "Upcoming"
-    try:
-        clean_str = iso_time_str.replace("Z", "+00:00")
-        utc_dt = datetime.fromisoformat(clean_str)
-        ist_tz = pytz.timezone("Asia/Kolkata")
-        ist_dt = utc_dt.astimezone(ist_tz)
-        return ist_dt.strftime("%d %b %Y, %I:%M %p IST")
-    except Exception:
-        return iso_time_str[:16].replace("T", " ")
+    safe_home = html.escape(str(home_team))
+    safe_away = html.escape(str(away_team))
+    safe_pick = html.escape(pick_display)
+    safe_source = html.escape(str(source))
+    safe_time = html.escape(str(commence_time))
+
+    min_playable = cutoff_odds if cutoff_odds is not None else round(fair_odds * 1.025, 2)
+    pin_display = f"{pinny_fair:.2f}" if pinny_fair is not None else "N/A"
+
+    lines = [
+        f"🚨 <b>QUANT VALUE SIGNAL</b> | <b>{market_badge}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"🏟 <b>Fixture:</b> {safe_home} vs {safe_away}",
+        f"⏰ <b>Kickoff:</b> {safe_time}",
+        "",
+        f"🎯 <b>Selection:</b> <code>{safe_pick}</code>",
+        f"🏦 <b>Bookmaker:</b> <b>{safe_source} @ {market_odds:.2f}</b>",
+        "",
+        "📊 <b>PRICING BREAKDOWN</b>",
+        f"  • <b>Market Odds:</b> <code>{market_odds:.2f}</code>",
+        f"  • <b>Shin Model Fair:</b> <code>{fair_odds:.2f}</code>",
+        f"  • <b>Pinnacle Raw Line:</b> <code>{pin_display}</code>",
+        f"  • <b>Min Cutoff Odds:</b> <code>{min_playable:.2f}</code>",
+        f"  • <b>True Edge (EV):</b> <code>{edge_pct:+.2f}%</code>",
+        "",
+        f"💰 <b>Rec. Stake (0.25x Kelly):</b> <code>₹{stake:,.2f}</code>"
+    ]
+
+    if steam_reason:
+        safe_steam = html.escape(str(steam_reason))
+        lines.append(f"🔥 <b>Steam Check:</b> <i>{safe_steam}</i>")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
+
 
 def send_telegram_trade_alert(
     home_team: str,
@@ -128,89 +163,83 @@ def send_telegram_trade_alert(
     fair_odds: float,
     edge_pct: float,
     stake: float,
-    cutoff_odds: float,
-    source: str,
-    commence_time: str = None,
+    cutoff_odds: float = None,
+    source: str = "Soft Book",
+    commence_time: str = "TBD",
     pinny_fair: float = None,
     steam_reason: str = ""
-):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-
-    if selection == "Home":
-        target = f"{home_team} [BACK - Blue]"
-    elif selection == "Away":
-        target = f"{away_team} [BACK - Blue]"
-    else:
-        target = "Draw / X [BACK - Blue]"
-
-    match_time = format_kickoff_ist(commence_time)
-    sharp_line = f"• *Pinnacle Fair:* `{pinny_fair:.2f}`\n" if pinny_fair else ""
-    steam_flag = f"⚡ *STEAM ALERT:* _{steam_reason}_\n\n" if steam_reason else ""
-
-    caption = (
-        f"{steam_flag}⚽ *SIGNAL: {home_team} vs {away_team}*\n"
-        f"📅 *Kickoff:* `{match_time}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 *Pick:* *{target}*\n"
-        f"🏢 *Source:* {source}\n\n"
-        f"📊 *Odds Matrix:*\n"
-        f"• *Current Odds:* `{market_odds:.2f}`\n"
-        f"• *Model Fair:* `{fair_odds:.2f}`\n"
-        f"{sharp_line}"
-        f"• *Edge:* `+{edge_pct:.2f}%`\n"
-        f"• *Min Floor:* `>= {cutoff_odds:.2f}`\n\n"
-        f"💰 *Stake:* *₹{stake:,.2f}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+) -> bool:
+    """Sends the trade alert as a Photo with the pricing breakdown as the caption."""
+    msg_html = format_trade_message(
+        home_team=home_team,
+        away_team=away_team,
+        selection=selection,
+        market_odds=market_odds,
+        fair_odds=fair_odds,
+        edge_pct=edge_pct,
+        stake=stake,
+        cutoff_odds=cutoff_odds,
+        source=source,
+        commence_time=commence_time,
+        pinny_fair=pinny_fair,
+        steam_reason=steam_reason
     )
 
-    # 1. Attempt to generate single combined matchup banner
-    banner_buffer = generate_matchup_banner(home_team, away_team)
-    if banner_buffer:
-        photo_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-        files = {"photo": ("banner.png", banner_buffer, "image/png")}
-        data = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "caption": caption,
-            "parse_mode": "Markdown"
-        }
-        try:
-            res = requests.post(photo_url, data=data, files=files, timeout=8)
-            if res.status_code == 200:
-                return True
-        except requests.RequestException:
-            pass
-
-    # 2. Plain text fallback if images fail to download
-    text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": caption,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
-    try:
-        res = requests.post(text_url, json=payload, timeout=6)
-        return res.status_code == 200
-    except requests.RequestException:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("  [!] Telegram credentials missing in .env. Printing alert locally:")
+        print(msg_html)
         return False
+
+    logo_url = get_team_logo(home_team, selection)
+    
+    # Attempt photo dispatch first
+    photo_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    photo_payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "photo": logo_url,
+        "caption": msg_html,
+        "parse_mode": "HTML"
+    }
+
+    try:
+        res = requests.post(photo_url, json=photo_payload, timeout=10)
+        if res.status_code == 200:
+            return True
+            
+        # Fallback to standard text message if dynamic badge URL fails
+        text_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        text_payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg_html,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        res_text = requests.post(text_url, json=text_payload, timeout=10)
+        if res_text.status_code == 200:
+            return True
+            
+        print(f"  [!] Telegram API Error (HTTP {res_text.status_code}): {res_text.text[:150]}")
+        return False
+        
+    except requests.RequestException as e:
+        print(f"  [!] Failed to send Telegram alert: {e}")
+        return False
+
 
 if __name__ == "__main__":
-    success = send_telegram_trade_alert(
-        home_team="Liverpool",
-        away_team="Manchester United",
-        selection="Away",
-        market_odds=4.33,
-        fair_odds=3.15,
-        edge_pct=35.45,
-        stake=678.90,
-        cutoff_odds=3.21,
-        source="1xBet",
-        commence_time="2026-11-08T16:30:00Z",
-        pinny_fair=4.10,
-        steam_reason="Pinnacle sharp dropped from 4.60 -> 4.20"
+    # Local preview test
+    sample = format_trade_message(
+        home_team="Leeds United",
+        away_team="Sunderland",
+        selection="Over 2.5",
+        market_odds=2.05,
+        fair_odds=1.92,
+        edge_pct=6.77,
+        stake=400.00,
+        cutoff_odds=1.98,
+        source="Unibet",
+        commence_time="08 Nov 15:00 UTC",
+        pinny_fair=1.88,
+        steam_reason="Sharp money backing pick (Line tightening: 1.94 to 1.88)"
     )
-    if success:
-        print("[+] Unified side-by-side banner sent to Telegram!")
-    else:
-        print("[!] Delivery failed.")
+    print(sample)
