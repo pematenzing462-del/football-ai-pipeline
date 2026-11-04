@@ -21,7 +21,7 @@ ODDS_API_KEY = (os.getenv("ODDS_API_KEY") or "").strip()
 DB_PATH = os.path.join(os.path.dirname(__file__), "trades.db")
 
 if not ODDS_API_KEY:
-    print("[!] Missing ODDS_API_KEY in .env file.")
+    print("[!] Missing ODDS_API_KEY in environment variables or .env file.")
     sys.exit(1)
 
 TARGET_LEAGUES = [
