@@ -33,7 +33,7 @@ TARGET_LEAGUES = [
     "soccer_uefa_champs_league",
     "soccer_uefa_europa_league",
     "soccer_uefa_europa_conference_league",
-    "soccer_efl_champ",              # English Championship (Midweek action)
+    "soccer_efl_champ",            # English Championship (Midweek action)
     "soccer_netherlands_eredivisie"  # Dutch Eredivisie (Midweek action)
 ]
 
@@ -148,7 +148,7 @@ def fetch_odds_for_league(sport_key: str) -> list:
         res = requests.get(url, params=params, timeout=15)
         if res.status_code == 200:
             return res.json()
-        print(f"  [!] API Error {sport_key}: HTTP {res.status_code} - {res.text[:120]}")
+        print(f"  [!] API Error {sport_key}: HTTP {res.status_code} {res.text[:120]}")
         return []
     except requests.RequestException as e:
         print(f"  [!] Connection failed for {sport_key}: {e}")
@@ -332,6 +332,7 @@ def record_trade(match_id: str, home_team: str, away_team: str, commence_time: s
     conn.close()
     return True
 
+
 def run_quant_scan(leagues: list = None, max_hours_ahead: int = 48) -> int:
     """Runs a complete scan over the selected leagues and horizon window (1X2 + Over/Under 2.5)."""
     init_db()
@@ -387,20 +388,17 @@ def run_quant_scan(leagues: list = None, max_hours_ahead: int = 48) -> int:
 
             pin_o25, pin_u25 = extract_totals_25(totals_market)
 
-            # Fetch previous snapshot BEFORE saving current snapshot to check line velocity
             prev_snap = get_previous_pinnacle_snapshot(match_id)
             record_pinnacle_snapshot(match_id, pin_h, pin_d, pin_a, pin_o25, pin_u25)
 
             true_p_h, true_p_d, true_p_a = devig_pinnacle(pin_h, pin_d, pin_a)
 
-            # Tuple structure: (selection_label, true_prob, fair_odds, is_draw, curr_pin, prev_pin, market_type)
             outcomes_meta = [
                 (home_team, true_p_h, 1.0 / true_p_h, False, pin_h, prev_snap["home_odds"] if prev_snap else None, "h2h"),
                 ("Draw", true_p_d, 1.0 / true_p_d, True, pin_d, prev_snap["draw_odds"] if prev_snap else None, "h2h"),
                 (away_team, true_p_a, 1.0 / true_p_a, False, pin_a, prev_snap["away_odds"] if prev_snap else None, "h2h")
             ]
 
-            # Add Over/Under 2.5 if Pinnacle has an active 2.5 goal line
             if pin_o25 and pin_u25:
                 true_p_o25, true_p_u25 = devig_shin([pin_o25, pin_u25])
                 outcomes_meta.append(
@@ -417,7 +415,6 @@ def run_quant_scan(leagues: list = None, max_hours_ahead: int = 48) -> int:
                 if fair_price > MAX_ODDS_CAP:
                     continue
 
-                # --- PINNACLE STEAM / DRIFT CHECK ---
                 steam_note = ""
                 if prev_pin is not None:
                     if curr_pin > prev_pin * (1.0 + MAX_DRIFT_TOLERANCE):
@@ -506,8 +503,6 @@ def run_quant_scan(leagues: list = None, max_hours_ahead: int = 48) -> int:
 
 
 if __name__ == "__main__":
-    import sys
-    # If run with '--auto' flag (from GitHub Actions), skip interactive menu and default to 24h scan
     if len(sys.argv) > 1 and sys.argv[1] == "--auto":
         run_quant_scan(max_hours_ahead=24.0)
     else:
