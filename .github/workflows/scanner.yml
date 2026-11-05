@@ -36,5 +36,15 @@ jobs:
         run: |
           git config --global user.name "Quant Bot Automation"
           git config --global user.email "bot@users.noreply.github.com"
-          git add trades.db
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update trades.db [skip ci]" && git push)
+
+          if [ -f trades.db ]; then
+            git add trades.db
+            if ! git diff --cached --quiet; then
+              git commit -m "Auto-update trades.db [skip ci]"
+              git push
+            else
+              echo "trades.db has no changes to save."
+            fi
+          else
+            echo "trades.db was not created; skipping the database commit."
+          fi        
